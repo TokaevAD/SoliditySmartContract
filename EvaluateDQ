@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: GPL-3.0
+
+pragma solidity >=0.7.0 <0.9.0;
+
+/** 
+ * @title ContractDQ
+ * @dev Evaluates the quality of incoming data
+ */
+contract DQ{
+    
+  address payable owner;
+  
+  event Processed (uint delta);
+  
+//передаваемые данные    
+  struct Measure { 
+    uint temperature;
+    uint time;
+    uint id;
+  }
+  
+  struct StoredRecord {
+  Measure[] smeasures;
+  bool saccuracy;
+  bool scompleteness;
+  bool sprecision;
+  bool stimeliness;
+  bool[] accuracyId;
+  bool[] precisionId;
+  }
+  
+  StoredRecord[] public mem;
+  uint public count;
+  uint[10] public idfailure; 
+
+//Эта функция измеряет среднюю температуру по пакету измерений, представленному в виде массива.
+  function avgTemp(Measure [] memory values) pure public returns (uint m) {
+      m = 0;
+      for (uint i=0; i<values.length; i++) {
+        m = m + values[i].temperature;
+      }
+      m = m / values.length;
+      return m;
+  }  
+  
+  function getAccuracy(uint i) view public returns(bool res){
+    return mem[i].saccuracy;
+  }
+  
+    function getCompleteness(uint i) view public returns(bool res){
+    return mem[i].scompleteness;
+  }
+  
+    function getPrecision(uint i) view public returns(bool res){
+    return mem[i].sprecision;
+  }
+  
+    function getTimeliness(uint i) view public returns(bool res){
+    return mem[i].stimeliness;
+  }
+    function getMeasures(uint i) view public returns(Measure[] memory a){
+    return (mem[i].smeasures);
+  }
+  
+//Эта функция получает массив данных, все дополнительные параметры, необходимые для оценки DQ, и вызывает соответствующие функции для оценки отдельных данных (температуры и времени), сохраняя результаты в памяти.
+//Перед возвратом сохраняет измерения в памяти контракта
+  function evaluateStream(Measure [] memory values, uint accuracyTemperature, uint accuracyTolerance, uint accuracyTrigger, uint completenessLenght, uint precisionTolerance, uint timelinessDelta, uint timelinessTrigger, uint submissionTime, uint history) payable public returns (bool ok) {
+      mem.push();
+
+      uint t=values.length;
+      mem[count].saccuracy = Accuracy(values, accuracyTemperature, accuracyTolerance, accuracyTrigger);
+      mem[count].scompleteness = Completeness(values, completenessLenght);
+      mem[count].sprecision = Precision(values, precisionTolerance);
+      mem[count].stimeliness = Timeliness(values, timelinessDelta, timelinessTrigger);
+      for (uint8 i=0; i<t;i++)    {
+        mem[count].smeasures.push(values[i]);
+        mem[count].accuracyId[i] = AccuracyId(values[i].temperature,accuracyTemperature, accuracyTolerance);
+        if (count > history){
+            mem[count].precisionId[i] = PrecisionId(values[i],precisionTolerance,history);   
+        }     
+      }
+      if(count > history){
+        for (uint8 i=0; i<t;i++)    {
+            if (mem[count].accuracyId[i] == false && mem[count].sprecision == false && mem[count].precisionId[i] == false){
+                idfailure[i] ++;
+            }       
+        }
+      }
+      count++;
+      emit Processed(block.timestamp - submissionTime);
+      return true;
+  }
+  
+//Эта функция получает набор данных, эталонное значение, принятый допуск и количество последовательных значений вне диапазона, необходимых для того, чтобы пометить пакет как некачественный, а затем оценивает точность данного пакета (истина/ложь)
+  function Accuracy(Measure [] memory values, uint mtemperature, uint tolerance, uint trigger) public view returns (bool check) {
+      uint8 conta = 0;
+      for (uint8 i=0; i<values.length; i++) {
+            if ((values[i].temperature>(mtemperature+tolerance) || values[i].temperature<(mtemperature-tolerance)) && idfailure[i]<2) {
+              conta++;
+              if (conta == trigger) {
+                  return false;
+              }
+            }
+            else conta = 0;
+      }
+      return true;
+  }
+
+    function AccuracyId(uint temperature, uint mtemperature, uint tolerance) public pure returns (bool check) {
+        if (temperature>(mtemperature+tolerance) || temperature<(mtemperature-tolerance)) 
+            return false;
+        else 
+            return true;
+  }
+
+//Эта функция получает пакет данных и ожидаемую длину пакета и, сравнивая два значения, возвращает полноту (true/false)
+  function Completeness(Measure [] memory values, uint len) view public returns (bool complete) {
+      uint total = values.length;
+      for(uint i=0; i<values.length; i++){
+          if (idfailure[i]>2){
+              total --;
+          }
+      }
+      if (total >= len)
+        return true;
+      return false;
+  }  
+  
+//Эта функция получает пакет данных и принятое максимальное стандартное отклонение, и после измерения стандартного отклонения полученного пакета она оценивает точность, сравнивая ее с порогом (истина/ложь)
+  function Precision(Measure [] memory values, uint limit) view public returns (bool ok) {
+      uint m = avgTemp(values);
+      uint sqm;
+      for (uint8 i=0; i<values.length; i++) {
+        if (values[i].temperature >= m && idfailure[i] < 2)
+          sqm = sqm + ((values[i].temperature-m)*(values[i].temperature-m));
+       
+      }
+      sqm = sqm / values.length;
+      if (sqm > (limit*limit)) {
+          return false;
+      }
+      return true;
+  }  
+
+  function PrecisionId(Measure memory values, uint limit, uint length) view public returns (bool ok) {
+      uint m;
+      uint sqm;
+      if (idfailure[values.id] > 2){
+          return false;
+      }
+      for (uint i = count-1; i <= count - length; i--){
+          m += mem[count].smeasures[values.id].temperature;
+      }
+      m = m / 5;
+
+      sqm = ((values.temperature-m)*(values.temperature-m)) / (length);
+      
+      if (sqm > (limit*limit)) {
+          return false;
+      }
+      return true;
+  }  
+
+//Эта функция получает пакет данных, максимальную допустимую задержку и количество последовательных значений вне диапазона, необходимых для пометки пакета как не качественного, а затем оценивает своевременность данного пакета (истина/ложь)
+  function Timeliness(Measure [] memory times, uint delta, uint trigger) view public returns (bool ok) {
+      uint conta = 0;
+      uint cur = block.timestamp;
+      uint normalized = 0;
+      for (uint8 i=0; i<times.length; i++) {
+            normalized = (cur-(60*(times.length-i)));
+            if ((normalized > times[i].time) && ((normalized-times[i].time)>delta)) {
+              conta++;
+              if (conta==trigger)    {
+                  return false;
+              }
+            }
+            else conta = 0;
+      }
+      return true;
+  }   
+
+  
+//Запасная функция необходима для контракта на получение эфира
+  fallback() external payable {
+  }
+}
